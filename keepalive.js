@@ -1,109 +1,129 @@
-const { chromium } = require('playwright');
+// keepalive.js — giữ Online trên SoWork bằng 1 phiên browser sống liên tục.
+// Nguồn phiên: biến môi trường SOWORK_SESSION (JSON storageState kèm IndexedDB) trên CI,
+//              hoặc file session.json khi chạy cục bộ.
+//
+// Cấu hình qua ENV (đều tùy chọn):
+//   RUN_MINUTES   : số phút giữ browser sống trước khi thoát (mặc định 350 ~ sát trần 6h của 1 job).
+//   STOP_HOUR_VN  : dừng khi giờ VN >= mốc này (mặc định 24 = nửa đêm).
 
-// Hàm tạo thời gian trễ ngẫu nhiên (tính bằng mili-giây)
+const { chromium } = require('playwright');
+const fs = require('fs');
+const zlib = require('zlib');
+
 const delay = ms => new Promise(res => setTimeout(res, ms));
+const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+const vnNow = () => new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
+
+const RUN_MINUTES = parseInt(process.env.RUN_MINUTES || '350', 10);
+const STOP_HOUR_VN = parseInt(process.env.STOP_HOUR_VN || '24', 10);
+
+function loadState() {
+  const raw = process.env.SOWORK_SESSION;
+  if (raw) {
+    const s = raw.trim();
+    // Ho tro ca 2 dinh dang: JSON tho, hoac base64(gzip(json)) — dung khi vuot gioi han 48KB cua secret.
+    if (s.startsWith('{')) return JSON.parse(s);
+    return JSON.parse(zlib.gunzipSync(Buffer.from(s, 'base64')).toString('utf8'));
+  }
+  if (fs.existsSync('session.json')) return JSON.parse(fs.readFileSync('session.json', 'utf8'));
+  throw new Error('Không tìm thấy phiên: đặt biến SOWORK_SESSION hoặc tạo file session.json (chạy capture-session.js).');
+}
 
 (async () => {
-  // Lấy thời gian hiện tại theo múi giờ Việt Nam
-  const vnTime = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
-  const currentHour = vnTime.getHours();
-  const currentMinute = vnTime.getMinutes();
+  const start = vnNow();
+  console.log(`[TIME] Bat dau luc (VN): ${start.getHours()}:${String(start.getMinutes()).padStart(2, '0')}`);
 
-  console.log(`[TIME] Gio hien tai tai Viet Nam: ${currentHour}:${currentMinute < 10 ? '0' + currentMinute : currentMinute}`);
-
-  // --- LOGIC NGẪU NHIÊN KHI BẮT ĐẦU VÀ KẾT THÚC ---
-  
-  // 1. Nếu đang ở khung giờ 8:00 AM - 8:15 AM: Ngẫu nhiên bỏ qua một số lượt chạy để tạo cảm giác vào làm muộn/sớm
-  if (currentHour === 8 && currentMinute <= 15) {
-    const randomStartDelay = Math.floor(Math.random() * 10); // Ngẫu nhiên từ 0 đến 10 phút
-    console.log(`[RANDOM] Khung gio bat dau 8AM. Tu dong delay ngau nhien ${randomStartDelay} phut...`);
-    await delay(randomStartDelay * 60 * 1000);
+  // Vào làm "muộn" ngẫu nhiên nếu đang đầu giờ sáng (7:00–7:15)
+  if (start.getHours() === 7 && start.getMinutes() <= 15) {
+    const d = rand(0, 10);
+    console.log(`[RANDOM] Dau gio 7AM -> delay ${d} phut cho tu nhien...`);
+    await delay(d * 60 * 1000);
   }
 
-  // 2. Nếu đang ở khung giờ 11:00 PM (23:00 PM): Ngẫu nhiên thoát sớm hoặc muộn quanh mốc 11PM
-  if (currentHour === 23) {
-    const randomChance = Math.random();
-    if (randomChance > 0.6) { // 40% cơ hội sẽ nghỉ sớm ngay từ sau 11h đêm
-      console.log('[RANDOM] Khung gio ket thuc 11PM. Ngau nhien dung chay luot nay de off som.');
-      process.exit(0); // Thoát script an toàn, hệ thống SoWork sẽ tự chuyển sang Away
-    }
-  }
-  // ------------------------------------------------
-
+  const state = loadState();
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
+    storageState: state,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    viewport: { width: 1280, height: 720 }
+    viewport: { width: 1280, height: 800 }
   });
+  const page = await context.newPage();
+
+  // Theo dõi WebSocket real-time cua SoWork -> tin hieu chac chan da Online
+  let gaiaConnected = false;
+  page.on('websocket', ws => { if (/api\.sowork\.com\/gaia/.test(ws.url())) gaiaConnected = true; });
+
+  // Bam 1 link/nut theo text neu no xuat hien (cho toi timeout)
+  const clickIfVisible = async (re, label, timeout) => {
+    try {
+      const el = page.getByText(re).first();
+      await el.waitFor({ state: 'visible', timeout });
+      await el.click();
+      console.log('-> Bam:', label);
+      return true;
+    } catch { return false; }
+  };
 
   try {
-    console.log('Dang nap bo ma Cookie tu GitHub Secrets...');
-    let rawCookies = JSON.parse(process.env.SOWORK_COOKIES);
-    
-    // Log thời gian hết hạn cookie
-    let earliestExpiry = Infinity;
-    let latestExpiry = 0;
+    console.log('Dang vao van phong ao app.sowork.com...');
+    // KHONG dung 'networkidle': khi da login, WebSocket real-time chay lien tuc nen khong bao gio idle.
+    await page.goto('https://app.sowork.com', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForTimeout(4000);
 
-    rawCookies.forEach(cookie => {
-      if (cookie.expirationDate) {
-        // expirationDate của cookie tính bằng giây, cần đổi sang mili-giây
-        const expiryMs = cookie.expirationDate * 1000;
-        if (expiryMs < earliestExpiry) earliestExpiry = expiryMs;
-        if (expiryMs > latestExpiry) latestExpiry = expiryMs;
-      }
-    });
-
-    console.log('==================================================');
-    if (earliestExpiry !== Infinity && latestExpiry !== 0) {
-      // Định dạng hiển thị theo múi giờ Việt Nam (Asia/Ho_Chi_Minh)
-      const options = { timeZone: 'Asia/Ho_Chi_Minh', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' };
-      
-      const earliestDate = new Date(earliestExpiry).toLocaleString('vi-VN', options);
-      const latestDate = new Date(latestExpiry).toLocaleString('vi-VN', options);
-      const now = Date.now();
-
-      console.log(`[THONG BAO] Phien dang nhap gan nhat se het han vao: ${earliestDate}`);
-      console.log(`[THONG BAO] Toan bo Cookie se het han hoan toan vao: ${latestDate}`);
-      
-      // Tính số ngày còn lại của phiên ngắn nhất
-      const daysLeft = ((earliestExpiry - now) / (1000 * 60 * 60 * 24)).toFixed(1);
-      if (daysLeft <= 0) {
-        console.log('============= BAN CAN UPDATE COOKIES MOI NGAY =============');
-      } else {
-        console.log(`[GOI Y] Ban con khoang ${daysLeft} ngay truoc khi phien dau tien bi het han.`);
-      }
-    } else {
-      console.log('[CANH BAO] Khong tim thay thong tin ngay het han trong Cookie. Co the day la Session Cookie tam thoi.');
+    // Kiem tra phien con hop le
+    const body = (await page.evaluate(() => document.body ? document.body.innerText : '')).slice(0, 300);
+    if (/Welcome to SoWork!|Continue with Google|Continue with Microsoft|Sign in with email/i.test(body)) {
+      console.error('❌ VAN O MAN HINH DANG NHAP — phien het han hoac khong hop le. Can chay lai capture-session.js.');
+      await page.screenshot({ path: 'keepalive-error.png' }).catch(() => {});
+      await browser.close();
+      process.exit(1);
     }
-    console.log('==================================================');
 
-    // Làm sạch dữ liệu SameSite
-    const cleanedCookies = rawCookies.map(cookie => {
-      const newCookie = { ...cookie };
-      if (newCookie.sameSite) {
-        const formatted = newCookie.sameSite.charAt(0).toUpperCase() + newCookie.sameSite.slice(1).toLowerCase();
-        newCookie.sameSite = ['Strict', 'Lax', 'None'].includes(formatted) ? formatted : undefined;
+    // Cong 1: man hinh "Launching SoWork" (~10-15s moi hien) -> "continue in your browser"
+    await clickIfVisible(/continue in your browser/i, 'continue in your browser', 45000);
+    await page.waitForTimeout(3000);
+    // Cong 2: man hinh chao phong -> vao ma khong can camera/mic
+    await clickIfVisible(/continue without camera or microphone/i, 'continue without camera or microphone', 30000);
+
+    // Cho ket noi real-time gaia (= Online)
+    for (let i = 0; i < 20 && !gaiaConnected; i++) await page.waitForTimeout(1500);
+    if (gaiaConnected) {
+      console.log('✅ Da ket noi real-time (gaia) — DANG ONLINE. Bat dau giu phien...');
+    } else {
+      console.log('⚠️  Chua thay ket noi gaia nhung da qua cac man cho — van tiep tuc giu phien.');
+    }
+    await page.screenshot({ path: 'keepalive-online.png' }).catch(() => {});
+
+    const deadline = Date.now() + RUN_MINUTES * 60 * 1000;
+    let tick = 0;
+    while (Date.now() < deadline) {
+      const now = vnNow();
+      // Dừng khi tới mốc nửa đêm (hoặc STOP_HOUR_VN)
+      if (now.getHours() >= STOP_HOUR_VN || (STOP_HOUR_VN === 24 && now.getHours() === 0)) {
+        console.log('[STOP] Toi mat gio nghi -> off.');
+        break;
       }
-      delete newCookie.hostOnly;
-      delete newCookie.session;
-      return newCookie;
-    });
-    
-    await context.addCookies(cleanedCookies);
-    const page = await context.newPage();
+      // 23h đêm: 40% cơ hội off sớm cho tự nhiên
+      if (now.getHours() === 23 && Math.random() > 0.6) {
+        console.log('[RANDOM] 23PM -> off som ngau nhien.');
+        break;
+      }
 
-    console.log('Dang tien vao van phong ao SoWork...');
-    await page.goto('https://sowork.com', { waitUntil: 'networkidle', timeout: 60000 });
-    
-    // Ngẫu nhiên thời gian treo máy từ 45 giây đến 90 giây mỗi lần ping để tránh hành vi rập khuôn
-    const randomKeepTime = Math.floor(Math.random() * (90000 - 45000 + 1)) + 45000;
-    console.log(`Trinh duyet mo thanh cong! Treo may ngau nhien trong ${(randomKeepTime/1000).toFixed(0)} giay...`);
-    
-    await page.waitForTimeout(randomKeepTime); 
-    console.log('Duy tri trang thai Online thanh cong!');
+      const wait = rand(45000, 90000);
+      await page.waitForTimeout(wait);
+
+      // Hoạt động nhẹ để tránh bị coi là idle: rê chuột ngẫu nhiên
+      await page.mouse.move(rand(200, 1000), rand(150, 650)).catch(() => {});
+      tick++;
+      if (tick % 10 === 0) {
+        console.log(`[ALIVE] tick ${tick} — VN ${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} — van Online.`);
+      }
+    }
+    console.log('Ket thuc phien giu Online.');
   } catch (error) {
-    console.error('Loi trong qua trinh gia lap:', error.message || error);
-  } {
+    console.error('Loi:', error.message || error);
+    await page.screenshot({ path: 'keepalive-error.png' }).catch(() => {});
+  } finally {
     await browser.close();
   }
 })();

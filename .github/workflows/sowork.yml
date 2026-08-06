@@ -2,14 +2,21 @@ name: SoWork Keep Alive
 
 on:
   schedule:
-    # Chạy mỗi 10 phút, từ 1:00 AM đến 4:59 PM giờ UTC (tương đương 8:00 AM đến 11:59 PM giờ VN)
-    # Áp dụng từ Thứ 2 đến Thứ 6 (1-5)
-    - cron: '*/10 1-16 * * 1-5'
-  workflow_dispatch: # Cho phép bấm chạy thủ công nếu muốn
+    # Mỗi job giữ browser sống liên tục ~5h50m (sát trần 6h của GitHub Actions).
+    # Khởi động 3 mốc/ngày (giờ UTC) để phủ 7:00–23:00 giờ VN, có gối đầu chống trễ cron.
+    #   00:00 UTC = 07:00 VN   (job chạy 07:00 -> ~12:50 VN)
+    #   05:30 UTC = 12:30 VN   (job chạy 12:30 -> ~18:20 VN)
+    #   11:00 UTC = 18:00 VN   (job chạy 18:00 -> tự dừng lúc 23:00 VN)
+    # Thứ 2 đến Thứ 6.
+    - cron: '0 0 * * 1-5'
+    - cron: '30 5 * * 1-5'
+    - cron: '0 11 * * 1-5'
+  workflow_dispatch: # Cho phép bấm chạy thủ công
 
 jobs:
-  ping-sowork:
+  keep-alive:
     runs-on: ubuntu-latest
+    timeout-minutes: 355  # ~5h55m; keepalive.js tự thoát trước bằng RUN_MINUTES
 
     steps:
     - name: Kiểm tra mã nguồn
@@ -20,13 +27,22 @@ jobs:
       with:
         node-version: '20'
 
-    - name: Cài đặt thư viện Playwright
+    - name: Cài đặt Playwright
       run: |
-        npm init -y
-        npm install playwright
+        npm install playwright@1.62.1
         npx playwright install chromium --with-deps
 
-    - name: Chạy mã giữ trạng thái Online
+    - name: Giữ trạng thái Online
       env:
-        SOWORK_COOKIES: ${{ secrets.SOWORK_COOKIES }}
+        SOWORK_SESSION: ${{ secrets.SOWORK_SESSION }}
+        RUN_MINUTES: '350'
+        STOP_HOUR_VN: '23'
       run: node keepalive.js
+
+    - name: Lưu ảnh chụp lỗi (nếu có)
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: keepalive-error
+        path: keepalive-error.png
+        if-no-files-found: ignore

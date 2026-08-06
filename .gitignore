@@ -1,0 +1,12 @@
+node_modules/
+package-lock.json
+
+# BÍ MẬT — KHÔNG BAO GIỜ commit các file này (chứa token đăng nhập):
+session.json
+session.b64.txt
+data.json
+
+# Ảnh chụp debug
+verify.png
+keepalive-error.png
+shot.png
