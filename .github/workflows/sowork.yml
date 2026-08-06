@@ -39,7 +39,8 @@ jobs:
     - name: Giữ trạng thái Online
       env:
         SOWORK_SESSION: ${{ secrets.SOWORK_SESSION }}
-        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}   # có thì keepalive tự báo Slack khi mất kết nối/hết phiên
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}   # có thì keepalive tự báo Slack mọi sự kiện
+        SLACK_USER_ID: ${{ secrets.SLACK_USER_ID }}           # member ID (U...) để tag bạn trong tin nhắn
         RUN_MINUTES: '320'   # 5h20m -> ca kết thúc ~10 phút trước ca kế, không đè nhau
         STOP_HOUR_VN: '23'
       run: node keepalive.js
@@ -56,10 +57,13 @@ jobs:
       if: failure()
       env:
         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        SLACK_USER_ID: ${{ secrets.SLACK_USER_ID }}
       run: |
         if [ -n "$SLACK_WEBHOOK_URL" ]; then
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          MENTION=""
+          if [ -n "$SLACK_USER_ID" ]; then MENTION="<@$SLACK_USER_ID> "; fi
           curl -s -X POST -H 'Content-Type: application/json' \
-            -d "{\"text\":\"❌ *SoWork Keep Alive* job THẤT BẠI. Xem log: $RUN_URL\"}" \
+            -d "{\"text\":\"${MENTION}❌ *SoWork Keep Alive* job THẤT BẠI. Xem log: $RUN_URL\",\"link_names\":1}" \
             "$SLACK_WEBHOOK_URL" || true
         fi

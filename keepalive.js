@@ -22,6 +22,8 @@ const RUN_MINUTES = parseInt(process.env.RUN_MINUTES || '350', 10);
 const STOP_HOUR_VN = parseInt(process.env.STOP_HOUR_VN || '24', 10);
 const GROUP_ID = process.env.SOWORK_GROUP_ID || '5yBGdkKFdacSqo4bWb2j';
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
+const SLACK_USER_ID = process.env.SLACK_USER_ID; // member ID (U...) để tag; có thể để trống
+const SLACK_MENTION = SLACK_USER_ID ? `<@${SLACK_USER_ID}> ` : '';
 
 function loadState() {
   const raw = process.env.SOWORK_SESSION;
@@ -40,7 +42,7 @@ async function notifySlack(text) {
   try {
     await fetch(SLACK_WEBHOOK_URL, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text })
+      body: JSON.stringify({ text: SLACK_MENTION + text, link_names: 1 })
     });
   } catch (e) {
     console.error('[SLACK] Gui that bai:', e.message || e);
@@ -88,6 +90,7 @@ async function isPresent(idToken, userId) {
 
   const state = loadState();
   logSessionInfo(state);
+  await notifySlack(`🚀 *SoWork keepalive*: bắt đầu ca giữ Online lúc ${vnClock()} (VN).`);
 
   // Chuẩn bị token để kiểm tra presence (nếu lấy được auth từ phiên)
   const { apiKey, refreshToken } = extractAuth(state);
@@ -97,6 +100,11 @@ async function isPresent(idToken, userId) {
     tokenAt = Date.now();
     if (idToken) {
       try { userId = JSON.parse(Buffer.from(idToken.split('.')[1], 'base64').toString()).user_id; } catch {}
+    } else {
+      // Làm mới token thất bại -> refresh token đã bị thu hồi -> PHIÊN HẾT HẠN (chắc chắn).
+      console.error('❌ PHIEN HET HAN (khong lam moi duoc token). Can chay lai capture-session.js.');
+      await notifySlack(`❌ *SoWork keepalive*: PHIÊN HẾT HẠN (${vnClock()}) — refresh token bị thu hồi/hết hạn. Hãy chạy lại capture-session.js + cập nhật secret SOWORK_SESSION.`);
+      process.exit(1);
     }
   }
   const canCheckPresence = !!(idToken && userId);
@@ -161,8 +169,13 @@ async function isPresent(idToken, userId) {
     await clickIfVisible(/continue without camera or microphone/i, 'continue without camera or microphone', 30000);
 
     for (let i = 0; i < 20 && !gaiaConnected; i++) await page.waitForTimeout(1500);
-    if (gaiaConnected) console.log('✅ Da ket noi real-time (gaia) — DANG ONLINE. Bat dau giu phien...');
-    else console.log('⚠️  Chua thay ket noi gaia nhung da qua cac man cho — van tiep tuc giu phien.');
+    if (gaiaConnected) {
+      console.log('✅ Da ket noi real-time (gaia) — DANG ONLINE. Bat dau giu phien...');
+      await notifySlack(`✅ *SoWork keepalive*: đã VÀO văn phòng — ONLINE lúc ${vnClock()} (VN).`);
+    } else {
+      console.log('⚠️  Chua thay ket noi gaia nhung da qua cac man cho — van tiep tuc giu phien.');
+      await notifySlack(`⚠️ *SoWork keepalive*: đã qua các màn chờ nhưng CHƯA thấy kết nối real-time (${vnClock()}). Vẫn tiếp tục giữ phiên.`);
+    }
     await page.screenshot({ path: 'keepalive-online.png' }).catch(() => {});
 
     const deadline = Date.now() + RUN_MINUTES * 60 * 1000;
@@ -189,6 +202,14 @@ async function isPresent(idToken, userId) {
           if (Date.now() - tokenAt > 50 * 60 * 1000) {
             const t = await refreshIdToken(apiKey, refreshToken);
             if (t) { idToken = t; tokenAt = Date.now(); }
+            else {
+              // Hết phiên giữa chừng -> báo Slack và dừng sạch (không để catch báo "LỖI" trùng).
+              console.error('❌ PHIEN HET HAN giua chung (khong lam moi duoc token).');
+              await notifySlack(`❌ *SoWork keepalive*: PHIÊN HẾT HẠN giữa chừng lúc ${vnClock()} — refresh token bị thu hồi/hết hạn. Hãy chạy lại capture-session.js + cập nhật secret SOWORK_SESSION.`);
+              shuttingDown = true;
+              await browser.close();
+              process.exit(1);
+            }
           }
           const present = await isPresent(idToken, userId);
           if (online && !present) {
@@ -218,6 +239,7 @@ async function isPresent(idToken, userId) {
       }
     }
     console.log('Ket thuc phien giu Online.');
+    await notifySlack(`🏁 *SoWork keepalive*: THOÁT session — kết thúc ca lúc ${vnClock()} (VN).`);
   } catch (error) {
     console.error('Loi:', error.message || error);
     await page.screenshot({ path: 'keepalive-error.png' }).catch(() => {});
