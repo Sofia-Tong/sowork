@@ -6,6 +6,7 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const zlib = require('zlib');
+const { logSessionInfo } = require('./session-info');
 
 function loadState() {
   const raw = process.env.SOWORK_SESSION;
@@ -19,6 +20,7 @@ function loadState() {
 
 (async () => {
   const state = loadState();
+  logSessionInfo(state);
 
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({

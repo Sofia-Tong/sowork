@@ -9,6 +9,7 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const zlib = require('zlib');
+const { logSessionInfo } = require('./session-info');
 
 const delay = ms => new Promise(res => setTimeout(res, ms));
 const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
@@ -41,6 +42,7 @@ function loadState() {
   }
 
   const state = loadState();
+  logSessionInfo(state);
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     storageState: state,
