@@ -27,6 +27,5 @@ jobs:
 
     - name: Chạy mã giữ trạng thái Online
       env:
-        SOWORK_EMAIL: ${{ secrets.SOWORK_EMAIL }}
-        SOWORK_PASSWORD: ${{ secrets.SOWORK_PASSWORD }}
+        SOWORK_COOKIES: ${{ secrets.SOWORK_COOKIES }}
       run: node keepalive.js
