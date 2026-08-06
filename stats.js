@@ -1,5 +1,7 @@
 // stats.js — xem thời gian hoạt động trên SoWork mà KHÔNG cần mở app (không tạo presence, không đá phiên trên GitHub).
-// Cách hoạt động: tự làm mới ID token từ refresh token trong phiên, rồi gọi thẳng API Reports của SoWork.
+// Cách hoạt động: tự làm mới ID token từ refresh token trong phiên, rồi gọi API SoWork:
+//   - Trạng thái real-time: gaia/rooms + reports/getInMeetingUserIds
+//   - Thời gian làm việc/ngày: analytics/user-working-hours (CÙNG nguồn với trang Insights → khớp số)
 //
 // Cách chạy:
 //   node stats.js                 -> hôm nay (giờ VN)
@@ -33,13 +35,19 @@ function todayVN() {
   return parts; // en-CA -> YYYY-MM-DD
 }
 
-function fmtDur(minutes) {
-  const m = Math.round(minutes);
+function fmtDurSec(seconds) {
+  const m = Math.round(seconds / 60);
   const h = Math.floor(m / 60);
-  return `${h}h${String(m % 60).padStart(2, '0')}m (${m} phút)`;
+  return `${h}h${String(m % 60).padStart(2, '0')}m`;
 }
-function fmtClock(sec) {
-  return new Date(sec * 1000).toLocaleString('vi-VN', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+function fmtClockISO(iso) {
+  return new Date(iso).toLocaleString('vi-VN', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+}
+// Cộng n ngày vào chuỗi "YYYY-MM-DD" (dùng UTC để tránh lệch)
+function addDays(dateStr, n) {
+  const [y, mo, d] = dateStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, mo - 1, d + n));
+  return dt.toISOString().slice(0, 10);
 }
 
 async function main() {
@@ -65,8 +73,8 @@ async function main() {
   const userName = claims.name || userId;
   const groupId = DEFAULT_GROUP_ID;
 
-  const api = async (path, body) => {
-    const res = await fetch(`https://api.sowork.com/api/v1/reports/${path}`, {
+  const post = async (path, body) => {
+    const res = await fetch(`https://api.sowork.com/api/v1/${path}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${idToken}` },
       body: JSON.stringify(body)
     });
@@ -74,37 +82,67 @@ async function main() {
     return res.json();
   };
 
-  // 1) Thời gian trong văn phòng (online) theo ngày
-  const dwh = await api('getGroupDailyWorkHoursLocal', { groupId, startDate, endDate, timezone: TZ });
-  const myDays = (dwh.data || []).filter(d => d.userId === userId);
-  const worldMin = myDays.reduce((s, d) => s + (d.worldDurationMinutes || 0), 0);
-  const enters = myDays.map(d => d.enterAt && d.enterAt.seconds).filter(Boolean);
-  const exits = myDays.map(d => d.exitAt && d.exitAt.seconds).filter(Boolean);
+  // 0) TRẠNG THÁI HIỆN TẠI (real-time, snapshot — không join phòng nên không tạo presence)
+  let statusLabel, statusEmoji, totalOnline = 0;
+  try {
+    const rooms = await post('gaia/rooms', { groupId });
+    const onlineSet = new Set();
+    Object.values(rooms.roomDefinitionMap || {}).forEach(rd =>
+      (rd.rooms || []).forEach(rm => (rm.userIds || []).forEach(u => onlineSet.add(u))));
+    totalOnline = onlineSet.size;
+    const meetingSet = new Set((await post('reports/getInMeetingUserIds', { groupId })).userIds || []);
+    if (!onlineSet.has(userId)) { statusEmoji = '⚪'; statusLabel = 'Offline (không có trong văn phòng)'; }
+    else if (meetingSet.has(userId)) { statusEmoji = '🎥'; statusLabel = 'Online — đang họp'; }
+    else { statusEmoji = '🟢'; statusLabel = 'Online — trong văn phòng'; }
+  } catch (e) {
+    statusEmoji = '❓'; statusLabel = 'Không lấy được trạng thái (' + (e.message || e) + ')';
+  }
 
-  // 2) Thời gian họp
-  const ms = await api('getUserTotalMeetingStats', { groupId, userId, startDate, endDate, timezone: TZ });
-  const meetingMin = (ms.data && ms.data.user_duration_s ? ms.data.user_duration_s : 0) / 60;
-  const meetingCount = (ms.data && ms.data.user_meetings) || 0;
+  const get = async (path) => {
+    const res = await fetch(`https://api.sowork.com/api/v1/${path}`, {
+      headers: { 'Authorization': `Bearer ${idToken}` }
+    });
+    if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    return res.json();
+  };
 
-  const nonMeetingMin = Math.max(0, worldMin - meetingMin);
+  // 1) THỜI GIAN LÀM VIỆC theo ngày — nguồn CHÍNH XÁC như trang Insights (analytics/user-working-hours).
+  //    Endpoint trả về nguyên tuần (Mon–Sun) chứa fromDate; ta gom các tuần phủ [startDate, endDate].
+  const tzParam = encodeURIComponent('Asia/Saigon');
+  const dayMap = {};
+  for (let from = startDate; from <= endDate; from = addDays(from, 7)) {
+    const wk = await get(`analytics/user-working-hours?groupId=${groupId}&userId=${userId}&fromDate=${from}&timezone=${tzParam}`);
+    (wk.days || []).forEach(d => { dayMap[d.date] = d; });
+  }
+  const days = Object.values(dayMap)
+    .filter(d => d.date >= startDate && d.date <= endDate && (d.totalSeconds || d.clockIn));
+
+  const officeSec = days.reduce((s, d) => s + (d.totalSeconds || 0), 0);
+  const awaySec = days.reduce((s, d) => s + (d.awaySeconds || 0), 0);
+  const onlineSec = Math.max(0, officeSec - awaySec);
+  const clockIns = days.map(d => d.clockIn).filter(Boolean).sort();
+  const clockOuts = days.map(d => d.clockOut).filter(Boolean).sort();
+
+  const nowVN = new Date().toLocaleString('vi-VN', { timeZone: TZ, hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
 
   console.log('==================================================');
   console.log(`  BAO CAO HOAT DONG SOWORK — ${userName}`);
   console.log(`  Khoang: ${startDate}${endDate !== startDate ? ' → ' + endDate : ''} (gio ${TZ})`);
   console.log('==================================================');
-  if (myDays.length === 0) {
-    console.log('  (Chua co du lieu trong van phong cho khoang nay.)');
+  console.log(`  ${statusEmoji} TRANG THAI NGAY BAY GIO (${nowVN}): ${statusLabel}`);
+  console.log(`     (${totalOnline} nguoi dang online trong van phong)`);
+  console.log('  --------------------------------------------------');
+  if (days.length === 0) {
+    console.log('  (Chua co du lieu cho khoang nay.)');
   } else {
-    if (enters.length) console.log(`  Vao lan dau : ${fmtClock(Math.min(...enters))}`);
-    if (exits.length)  console.log(`  Ra lan cuoi : ${fmtClock(Math.max(...exits))}`);
+    if (clockIns.length) console.log(`  Vao lan dau : ${fmtClockISO(clockIns[0])}`);
+    if (clockOuts.length) console.log(`  Ra lan cuoi : ${fmtClockISO(clockOuts[clockOuts.length - 1])}`);
   }
-  console.log('  ----------------------------------------');
-  console.log(`  🟢 Trong van phong (online) : ${fmtDur(worldMin)}`);
-  console.log(`  🎥 Trong do dang hop        : ${fmtDur(meetingMin)}  (${meetingCount} luot)`);
-  console.log(`  💤 Ngoai hop (online != hop): ${fmtDur(nonMeetingMin)}`);
+  console.log('  --------------------------------------------------');
+  console.log(`  🏢 Trong van phong (tong)  : ${fmtDurSec(officeSec)}`);
+  console.log(`  🟢 Dang online (hoat dong) : ${fmtDurSec(onlineSec)}`);
+  console.log(`  💤 Away (roi ban phim)     : ${fmtDurSec(awaySec)}`);
   console.log('==================================================');
-  console.log('  Luu y: API Reports cua SoWork khong tach rieng chi so "Away/idle";');
-  console.log('  "Ngoai hop" = tong thoi gian trong van phong tru thoi gian hop.');
 
   // Nếu chạy trên GitHub Actions -> ghi báo cáo Markdown vào Job Summary (xem trên app GitHub / điện thoại).
   if (process.env.GITHUB_STEP_SUMMARY) {
@@ -112,18 +150,21 @@ async function main() {
     const md = [
       `## 📊 Hoạt động SoWork — ${userName}`,
       ``,
+      `### ${statusEmoji} Ngay bây giờ (${nowVN}): **${statusLabel}**`,
+      `<sub>${totalOnline} người đang online trong văn phòng</sub>`,
+      ``,
       `**Khoảng:** ${range} _(giờ VN)_`,
       ``,
-      myDays.length && enters.length ? `- 🕗 **Vào lần đầu:** ${fmtClock(Math.min(...enters))}` : `- _(Chưa có dữ liệu trong văn phòng)_`,
-      myDays.length && exits.length ? `- 🕔 **Ra lần cuối:** ${fmtClock(Math.max(...exits))}` : ``,
+      days.length && clockIns.length ? `- 🕗 **Vào lần đầu:** ${fmtClockISO(clockIns[0])}` : `- _(Chưa có dữ liệu)_`,
+      days.length && clockOuts.length ? `- 🕔 **Ra lần cuối:** ${fmtClockISO(clockOuts[clockOuts.length - 1])}` : ``,
       ``,
       `| Chỉ số | Thời lượng |`,
       `| --- | --- |`,
-      `| 🟢 Trong văn phòng (online) | **${fmtDur(worldMin)}** |`,
-      `| 🎥 Đang họp | ${fmtDur(meetingMin)} (${meetingCount} lượt) |`,
-      `| 💤 Ngoài họp | ${fmtDur(nonMeetingMin)} |`,
+      `| 🏢 Trong văn phòng (tổng) | **${fmtDurSec(officeSec)}** |`,
+      `| 🟢 Đang online (hoạt động) | ${fmtDurSec(onlineSec)} |`,
+      `| 💤 Away (rời bàn phím) | ${fmtDurSec(awaySec)} |`,
       ``,
-      `<sub>Đọc qua API — không mở app, không ảnh hưởng phiên keepalive. "Ngoài họp" = online − họp (API không có chỉ số Away riêng).</sub>`,
+      `<sub>Đọc qua API analytics/user-working-hours — cùng nguồn với trang Insights. Không mở app, không ảnh hưởng phiên keepalive.</sub>`,
       ``
     ].join('\n');
     fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);
