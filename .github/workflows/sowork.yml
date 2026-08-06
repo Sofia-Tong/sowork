@@ -2,21 +2,26 @@ name: SoWork Keep Alive
 
 on:
   schedule:
-    # Mỗi job giữ browser sống liên tục ~5h50m (sát trần 6h của GitHub Actions).
-    # Khởi động 3 mốc/ngày (giờ UTC) để phủ 7:00–23:00 giờ VN, có gối đầu chống trễ cron.
-    #   00:00 UTC = 07:00 VN   (job chạy 07:00 -> ~12:50 VN)
-    #   05:30 UTC = 12:30 VN   (job chạy 12:30 -> ~18:20 VN)
-    #   11:00 UTC = 18:00 VN   (job chạy 18:00 -> tự dừng lúc 23:00 VN)
-    # Thứ 2 đến Thứ 6.
+    # ⚠️ SoWork CHỈ cho 1 kết nối/tài khoản — 2 phiên chạy song song sẽ ĐÁ nhau (rớt liên tục).
+    # => Các ca chạy KHÔNG gối đầu. Mỗi ca ~5h20m, tự thoát ~10 phút TRƯỚC khi ca sau bắt đầu.
+    #   00:00 UTC = 07:00 VN   (07:00 -> ~12:20 VN)
+    #   05:30 UTC = 12:30 VN   (12:30 -> ~17:50 VN)
+    #   11:00 UTC = 18:00 VN   (18:00 -> tự dừng lúc 23:00 VN)
+    # Thứ 2 đến Thứ 6. (Có khoảng hở ~10 phút giữa các ca để tránh 2 phiên đè nhau.)
     - cron: '0 0 * * 1-5'
     - cron: '30 5 * * 1-5'
     - cron: '0 11 * * 1-5'
   workflow_dispatch: # Cho phép bấm chạy thủ công
 
+# Chặn 2 lần chạy chồng nhau (nếu 1 job trễ giờ, hủy job cũ trước khi chạy cái mới)
+concurrency:
+  group: sowork-keepalive
+  cancel-in-progress: true
+
 jobs:
   keep-alive:
     runs-on: ubuntu-latest
-    timeout-minutes: 355  # ~5h55m; keepalive.js tự thoát trước bằng RUN_MINUTES
+    timeout-minutes: 325  # ~5h25m; keepalive.js tự thoát trước bằng RUN_MINUTES
 
     steps:
     - name: Kiểm tra mã nguồn
@@ -35,7 +40,7 @@ jobs:
     - name: Giữ trạng thái Online
       env:
         SOWORK_SESSION: ${{ secrets.SOWORK_SESSION }}
-        RUN_MINUTES: '350'
+        RUN_MINUTES: '320'   # 5h20m -> ca kết thúc ~10 phút trước ca kế, không đè nhau
         STOP_HOUR_VN: '23'
       run: node keepalive.js
 
