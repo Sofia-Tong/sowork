@@ -42,19 +42,40 @@ const delay = ms => new Promise(res => setTimeout(res, ms));
     
     // Log thời gian hết hạn cookie
     let earliestExpiry = Infinity;
+    let latestExpiry = 0;
+
     rawCookies.forEach(cookie => {
       if (cookie.expirationDate) {
+        // expirationDate của cookie tính bằng giây, cần đổi sang mili-giây
         const expiryMs = cookie.expirationDate * 1000;
         if (expiryMs < earliestExpiry) earliestExpiry = expiryMs;
+        if (expiryMs > latestExpiry) latestExpiry = expiryMs;
       }
     });
 
-    if (earliestExpiry !== Infinity) {
-      const options = { timeZone: 'Asia/Ho_Chi_Minh', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' };
+    console.log('==================================================');
+    if (earliestExpiry !== Infinity && latestExpiry !== 0) {
+      // Định dạng hiển thị theo múi giờ Việt Nam (Asia/Ho_Chi_Minh)
+      const options = { timeZone: 'Asia/Ho_Chi_Minh', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' };
+      
       const earliestDate = new Date(earliestExpiry).toLocaleString('vi-VN', options);
-      const daysLeft = ((earliestExpiry - Date.now()) / (1000 * 60 * 60 * 24)).toFixed(1);
-      console.log(`[COOKIE INFO] Phien se het han vao: ${earliestDate} (Con ${daysLeft} ngay).`);
+      const latestDate = new Date(latestExpiry).toLocaleString('vi-VN', options);
+      const now = Date.now();
+
+      console.log(`[THONG BAO] Phien dang nhap gan nhat se het han vao: ${earliestDate}`);
+      console.log(`[THONG BAO] Toan bo Cookie se het han hoan toan vao: ${latestDate}`);
+      
+      // Tính số ngày còn lại của phiên ngắn nhất
+      const daysLeft = ((earliestExpiry - now) / (1000 * 60 * 60 * 24)).toFixed(1);
+      if (daysLeft <= 0) {
+        console.log('============= BAN CAN UPDATE COOKIES MOI NGAY =============');
+      } else {
+        console.log(`[GOI Y] Ban con khoang ${daysLeft} ngay truoc khi phien dau tien bi het han.`);
+      }
+    } else {
+      console.log('[CANH BAO] Khong tim thay thong tin ngay het han trong Cookie. Co the day la Session Cookie tam thoi.');
     }
+    console.log('==================================================');
 
     // Làm sạch dữ liệu SameSite
     const cleanedCookies = rawCookies.map(cookie => {
