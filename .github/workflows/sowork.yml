@@ -21,21 +21,20 @@ concurrency:
 jobs:
   keep-alive:
     runs-on: ubuntu-latest
+    # Image chính thức của Playwright: đã cài sẵn Node 20 + Chromium + thư viện hệ thống
+    # -> KHÔNG cần setup-node, KHÔNG cần tải Chromium mỗi lần (nhanh hơn hẳn).
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-jammy
     timeout-minutes: 325  # ~5h25m; keepalive.js tự thoát trước bằng RUN_MINUTES
 
     steps:
     - name: Kiểm tra mã nguồn
       uses: actions/checkout@v4
 
-    - name: Cài đặt Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-
-    - name: Cài đặt Playwright
-      run: |
-        npm install playwright@1.62.1
-        npx playwright install chromium --with-deps
+    - name: Cài gói playwright (JS) — browser đã có sẵn trong image
+      env:
+        PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'  # dùng Chromium có sẵn, không tải lại
+      run: npm install playwright@1.62.1 --no-save
 
     - name: Giữ trạng thái Online
       env:
