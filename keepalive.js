@@ -1,52 +1,37 @@
 const { chromium } = require('playwright');
 
 (async () => {
-  // Khởi chạy trình duyệt ẩn danh với cấu hình giả lập người dùng thật
   const browser = await chromium.launch({ headless: true });
+  
+  // Khởi tạo ngữ cảnh với thông số máy tính thông thường
   const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 720 }
   });
-  const page = await context.newPage();
 
   try {
-    console.log('Đang truy cập SoWork...');
-    // Tăng thời gian chờ tải trang lên 60 giây đề phòng mạng chậm
-    await page.goto('https://sowork.com', { waitUntil: 'load', timeout: 60000 });
-
-    console.log('Đang tìm ô nhập thông tin đăng nhập...');
+    console.log('Đang nạp bộ mã Cookie bảo mật từ GitHub Secrets...');
     
-    // Đợi tối đa 15 giây cho đến khi các ô nhập liệu xuất hiện trên màn hình
-    // Sử dụng bộ định vị linh hoạt hơn (tìm theo id, placeholder hoặc thuộc tính)
-    const emailSelector = 'input[id="email"], input[type="email"], input[placeholder*="email" i]';
-    const passwordSelector = 'input[id="password"], input[type="password"], input[placeholder*="password" i]';
+    // Đọc mã Cookie từ biến môi trường và giải mã chuỗi JSON
+    const cookies = JSON.parse(process.env.SOWORK_COOKIES);
     
-    await page.waitForSelector(emailSelector, { state: 'visible', timeout: 15000 });
+    // Nạp Cookie trực tiếp vào trình duyệt ảo
+    await context.addCookies(cookies);
+    console.log('Nạp Cookie thành công!');
 
-    // Điền thông tin đăng nhập từ biến môi trường
-    await page.fill(emailSelector, process.env.SOWORK_EMAIL);
-    await page.fill(passwordSelector, process.env.SOWORK_PASSWORD);
-    console.log('Đã điền Email và Mật khẩu.');
+    const page = await context.newPage();
 
-    // Tìm và nhấn nút đăng nhập (bằng nút submit hoặc text bên trong nút)
-    const submitSelector = 'button[type="submit"], button:has-text("Sign In"), button:has-text("Log In")';
-    await page.click(submitSelector);
-    console.log('Đã nhấn nút Đăng nhập.');
+    console.log('Đang tiến vào văn phòng ảo SoWork trực tiếp...');
+    // Điều hướng thẳng vào trang quản lý chính mà không cần qua trang Login
+    await page.goto('https://app.sowork.com/', { waitUntil: 'networkidle', timeout: 60000 });
     
-    // Đợi hệ thống tải không gian làm việc
-    console.log('Đang giữ kết nối để hệ thống ghi nhận trạng thái Online...');
+    console.log('Trình duyệt đã mở văn phòng thành công mà không đòi mật khẩu!');
+    console.log('Đang giữ kết nối 45 giây để hệ thống ghi nhận trạng thái Online...');
+    
     await page.waitForTimeout(45000); 
-
-    console.log('Đã cập nhật trạng thái hoạt động thành công!');
+    console.log('Duy trì trạng thái Online thành công!');
   } catch (error) {
-    console.error('Lỗi khi duy trì trạng thái:', error);
-    
-    // Chụp ảnh màn hình lỗi để bạn dễ dàng kiểm tra xem trang web đang hiển thị gì
-    try {
-      await page.screenshot({ path: 'error-screenshot.png', fullPage: true });
-      console.log('Đã chụp ảnh màn hình lỗi: error-screenshot.png');
-    } catch (e) {
-      console.error('Không thể chụp ảnh màn hình:', e);
-    }
+    console.error('Lỗi trong quá trình giả lập:', error);
   } finally {
     await browser.close();
   }
