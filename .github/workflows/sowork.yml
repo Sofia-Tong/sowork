@@ -1,0 +1,32 @@
+name: SoWork Keep Alive
+
+on:
+  schedule:
+    # Chạy tự động mỗi 10 phút (từ Thứ 2 đến Thứ 6)
+    - cron: '*/10 * * * 1-5'
+  workflow_dispatch: # Cho phép bạn tự bấm nút chạy thử thủ công
+
+jobs:
+  ping-sowork:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Kiểm tra mã nguồn
+      uses: actions/checkout@v4
+
+    - name: Cài đặt Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-node: '20'
+
+    - name: Cài đặt thư viện Playwright
+      run: |
+        npm init -y
+        npm install playwright
+        npx playwright install chromium --with-deps
+
+    - name: Chạy mã giữ trạng thái Online
+      env:
+        SOWORK_EMAIL: ${{ secrets.SOWORK_EMAIL }}
+        SOWORK_PASSWORD: ${{ secrets.SOWORK_PASSWORD }}
+      run: node keepalive.js
