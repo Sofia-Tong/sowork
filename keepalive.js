@@ -120,13 +120,16 @@ async function isPresent(idToken, userId) {
 
   let shuttingDown = false;
   let gaiaConnected = false;
+  let gaiaClosed = false; // WS gaia hien dang dong? (reset khi reconnect)
   let lastDisconnectAlert = 0;
   let disconnectAlertSent = false;
   page.on('websocket', ws => {
     if (!/api\.sowork\.com\/gaia/.test(ws.url())) return;
     gaiaConnected = true;
+    gaiaClosed = false; // co ket noi gaia moi -> coi nhu da reconnect
     ws.on('close', () => {
       if (shuttingDown) return;
+      gaiaClosed = true;
       console.log(`[WS] gaia dong luc ${vnClock()}`);
       // Nếu KHÔNG kiểm tra được presence qua API thì dùng WS-close làm tín hiệu mất kết nối (có cooldown).
       if (!canCheckPresence) {
@@ -212,6 +215,18 @@ async function isPresent(idToken, userId) {
             }
           }
           const present = await isPresent(idToken, userId);
+
+          // WS phiên headless đã đóng NHƯNG API vẫn báo present
+          // -> một phiên KHÁC của bạn (app laptop/điện thoại) đang giữ Online.
+          // Nhường phiên: báo Slack đúng 1 lần rồi thoát sạch (exit 0).
+          if (gaiaClosed && present) {
+            console.log('[SELF] WS headless da dong nhung van present -> phien khac cua ban dang online. Nhuong phien va thoat.');
+            await notifySlack(`👋 *SoWork keepalive*: phát hiện bạn đã ĐĂNG NHẬP ở nơi khác (app laptop/điện thoại) lúc ${vnClock()} (VN) — phiên tự động NHƯỜNG và thoát.`);
+            shuttingDown = true;
+            await browser.close();
+            process.exit(0);
+          }
+
           if (online && !present) {
             // vừa bị rớt
             online = false;
