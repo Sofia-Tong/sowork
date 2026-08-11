@@ -8,7 +8,7 @@ on:
     # Mỗi lượt trước tiên KIỂM TRA đã online chưa:
     #   - Đang online (một ca khác đang giữ) -> thoát ngay, không đá phiên, không tốn thời gian.
     #   - Chưa online -> mới thật sự giữ phiên (RUN_MINUTES).
-    - cron: '*/20 0-15 * * 1-5'
+    - cron: '*/20 0-9 * * 1-5'
   workflow_dispatch: # Cho phép bấm chạy thủ công
 
 jobs:
@@ -45,7 +45,7 @@ jobs:
         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         SLACK_USER_ID: ${{ secrets.SLACK_USER_ID }}
         RUN_MINUTES: '340'   # giữ ~5h40m; khi kết thúc, lượt cron kế (≤20 phút sau) sẽ nối tiếp
-        STOP_HOUR_VN: '23'
+        STOP_HOUR_VN: '17'
       run: node keepalive.js
 
     - name: Lưu ảnh chụp lỗi (nếu có)
