@@ -4,7 +4,7 @@ on:
   schedule:
     # 15:30 UTC = 22:30 giờ VN — chạy KHI keepalive vẫn còn giữ online
     # (keepalive dừng lúc 23:00 VN), để báo cáo hiện "Online" thay vì "away/offline". T2–T6.
-    - cron: '30 15 * * 1-5'
+    - cron: '30 9 * * 1-5'
   workflow_dispatch:  # Bấm chạy tay bất cứ lúc nào (có thể mở github.com trên điện thoại để bấm)
     inputs:
       startDate:
