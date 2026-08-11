@@ -1,14 +1,21 @@
 // slack-bridge/worker.js — Cloudflare Worker làm cầu nối Slack -> GitHub Actions + SoWork API.
 // Slash command: /sowork run | stop | stats | status | help
 //
-// BIẾN MÔI TRƯỜNG (đặt trong Cloudflare: Settings -> Variables and Secrets, kiểu "Secret"):
-//   SLACK_SIGNING_SECRET : Signing Secret của Slack app (để xác thực request)
-//   GH_TOKEN             : GitHub Personal Access Token (Actions: read+write trên repo)
-//   GH_REPO              : "nhi-hoang-nsc/sowork"
-//   WORKFLOW_FILE        : "sowork.yml"   (tùy chọn, mặc định sowork.yml)
-//   GH_REF               : "main"          (tùy chọn)
-//   SOWORK_SESSION       : phiên SoWork (JSON hoặc base64-gzip) — dùng cho lệnh stats
-//   SOWORK_GROUP_ID      : id văn phòng (tùy chọn)
+// XÁC THỰC SLACK (một trong hai):
+//   SLACK_SIGNING_SECRET     : nếu Slack App ký request
+//   SLACK_VERIFICATION_TOKEN : nếu Slash Command kiểu cũ (không ký)
+//   ALLOWED_CHANNEL_IDS      : (tùy chọn) chỉ cho chạy trong các channel này
+//
+// NHIỀU NGƯỜI DÙNG (khuyến nghị) — đặt 1 biến JSON:
+//   USERS_JSON = {
+//     "U_SLACK_ID_1": { "apiKey":"...", "refreshToken":"...", "repo":"owner/repo", "ghToken":"github_pat_...", "groupId":"..." },
+//     "U_SLACK_ID_2": { ... }
+//   }
+//   -> mỗi Slack user chạy trên repo & phiên SoWork của CHÍNH họ. "groupId" tùy chọn (mặc định office NSC).
+//
+// MỘT NGƯỜI (nếu KHÔNG đặt USERS_JSON): dùng các biến rời
+//   SOWORK_API_KEY, SOWORK_REFRESH_TOKEN, GH_REPO, GH_TOKEN, WORKFLOW_FILE?, GH_REF?, SOWORK_GROUP_ID?,
+//   ALLOWED_SLACK_USER_IDS? (giới hạn ai được dùng)
 
 const TZ = 'Asia/Ho_Chi_Minh';
 
@@ -64,10 +71,10 @@ async function route(request, env, ctx) {
       return json({ response_type: 'ephemeral', text: '🚫 Lệnh này chỉ dùng được trong channel được cấp phép.' });
     }
 
-    // Giới hạn theo NGƯỜI (tùy chọn, có thể kết hợp): danh sách member ID.
-    const allow = (env.ALLOWED_SLACK_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
-    if (allow.length && !allow.includes(userId)) {
-      return json({ response_type: 'ephemeral', text: '🚫 Bạn không có quyền dùng lệnh này.' });
+    // Lấy cấu hình theo NGƯỜI (multi-user). Xem getUserConfig ở cuối file.
+    const cfg = getUserConfig(env, userId);
+    if (!cfg || !cfg.apiKey || !cfg.refreshToken) {
+      return json({ response_type: 'ephemeral', text: '🚫 Bạn chưa được cấu hình để dùng lệnh này (chưa có trong USERS_JSON).' });
     }
 
     if (sub === 'help' || !['run', 'stop', 'stats', 'status'].includes(sub)) {
@@ -79,84 +86,86 @@ async function route(request, env, ctx) {
 
     // Xử lý bất đồng bộ rồi trả kết quả qua response_url (tránh timeout 3s của Slack)
     ctx.waitUntil(
-      handle(sub, env)
+      handle(sub, cfg)
         .then(msg => postSlack(responseUrl, msg))
         .catch(err => postSlack(responseUrl, `❌ Lỗi: ${(err && err.message) || err}`))
     );
     return json({ response_type: 'ephemeral', text: '⏳ Đang xử lý...' });
 }
 
-async function handle(sub, env) {
-  if (sub === 'run') return await ghRun(env);
-  if (sub === 'stop') return await ghStop(env);
-  if (sub === 'stats') return await soworkReport(env, true);
-  if (sub === 'status') return await soworkReport(env, false);
+// Trả cấu hình của 1 Slack user. Multi-user: USERS_JSON = { "<slackUserId>": {apiKey, refreshToken, repo, ghToken, groupId?, workflow?, ref?} }.
+// Nếu KHÔNG đặt USERS_JSON -> chế độ 1 người (chủ), dùng các biến rời.
+function getUserConfig(env, slackUserId) {
+  if (env.USERS_JSON) {
+    let users = null;
+    try { users = JSON.parse(env.USERS_JSON); } catch { return null; }
+    return users[slackUserId] || null; // chỉ ai có trong map mới dùng được
+  }
+  // Chế độ 1 người: có thể giới hạn bằng ALLOWED_SLACK_USER_IDS
+  const allow = (env.ALLOWED_SLACK_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (allow.length && !allow.includes(slackUserId)) return null;
+  return {
+    apiKey: env.SOWORK_API_KEY, refreshToken: env.SOWORK_REFRESH_TOKEN,
+    repo: env.GH_REPO, ghToken: env.GH_TOKEN,
+    groupId: env.SOWORK_GROUP_ID, workflow: env.WORKFLOW_FILE, ref: env.GH_REF
+  };
+}
+
+async function handle(sub, cfg) {
+  if (sub === 'run') return await ghRun(cfg);
+  if (sub === 'stop') return await ghStop(cfg);
+  if (sub === 'stats') return await soworkReport(cfg, true);
+  if (sub === 'status') return await soworkReport(cfg, false);
 }
 
 /* ---------------- GitHub Actions ---------------- */
-function ghHeaders(env) {
+function ghHeaders(cfg) {
   return {
-    'Authorization': `Bearer ${env.GH_TOKEN}`,
+    'Authorization': `Bearer ${cfg.ghToken}`,
     'Accept': 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
     'User-Agent': 'sowork-slack-bridge'
   };
 }
-async function ghRun(env) {
-  const wf = env.WORKFLOW_FILE || 'sowork.yml';
-  const ref = env.GH_REF || 'main';
-  const res = await fetch(`https://api.github.com/repos/${env.GH_REPO}/actions/workflows/${wf}/dispatches`, {
-    method: 'POST', headers: { ...ghHeaders(env), 'Content-Type': 'application/json' },
+async function ghRun(cfg) {
+  if (!cfg.repo || !cfg.ghToken) return '⚙️ Chưa cấu hình repo/ghToken cho bạn (trong USERS_JSON).';
+  const wf = cfg.workflow || 'sowork.yml';
+  const ref = cfg.ref || 'main';
+  const res = await fetch(`https://api.github.com/repos/${cfg.repo}/actions/workflows/${wf}/dispatches`, {
+    method: 'POST', headers: { ...ghHeaders(cfg), 'Content-Type': 'application/json' },
     body: JSON.stringify({ ref })
   });
   if (res.status === 204) return '▶️ Đã khởi động keepalive. Chờ ~1 phút để vào văn phòng (bạn sẽ nhận Slack "đã VÀO văn phòng").';
   return `❌ Không khởi động được (HTTP ${res.status}): ${(await res.text()).slice(0, 200)}`;
 }
-async function ghStop(env) {
-  const wf = env.WORKFLOW_FILE || 'sowork.yml';
+async function ghStop(cfg) {
+  if (!cfg.repo || !cfg.ghToken) return '⚙️ Chưa cấu hình repo/ghToken cho bạn (trong USERS_JSON).';
+  const wf = cfg.workflow || 'sowork.yml';
   let ids = [];
   for (const st of ['in_progress', 'queued']) {
-    const res = await fetch(`https://api.github.com/repos/${env.GH_REPO}/actions/workflows/${wf}/runs?status=${st}&per_page=20`, { headers: ghHeaders(env) });
+    const res = await fetch(`https://api.github.com/repos/${cfg.repo}/actions/workflows/${wf}/runs?status=${st}&per_page=20`, { headers: ghHeaders(cfg) });
     if (res.ok) { const j = await res.json(); (j.workflow_runs || []).forEach(r => ids.push(r.id)); }
   }
   ids = [...new Set(ids)];
   if (ids.length === 0) return 'ℹ️ Không có phiên keepalive nào đang chạy.';
   let cancelled = 0;
   for (const id of ids) {
-    const res = await fetch(`https://api.github.com/repos/${env.GH_REPO}/actions/runs/${id}/cancel`, { method: 'POST', headers: ghHeaders(env) });
+    const res = await fetch(`https://api.github.com/repos/${cfg.repo}/actions/runs/${id}/cancel`, { method: 'POST', headers: ghHeaders(cfg) });
     if (res.status === 202) cancelled++;
   }
   return `⏹️ Đã gửi lệnh dừng cho ${cancelled}/${ids.length} phiên đang chạy.`;
 }
 
 /* ---------------- SoWork API ---------------- */
-async function loadState(env) {
-  const s = (env.SOWORK_SESSION || '').trim();
-  if (!s) throw new Error('Chưa cấu hình SOWORK_SESSION trong Worker.');
-  if (s.startsWith('{')) return JSON.parse(s);
-  // base64(gzip(json)) -> giải nén bằng DecompressionStream
-  const bin = Uint8Array.from(atob(s), c => c.charCodeAt(0));
-  const ds = new DecompressionStream('gzip');
-  const txt = await new Response(new Blob([bin]).stream().pipeThrough(ds)).text();
-  return JSON.parse(txt);
-}
-async function soworkAuth(env) {
-  // Ưu tiên 2 biến nhỏ (khuyến nghị cho Cloudflare vì SOWORK_SESSION quá lớn > 5kB).
-  let apiKey = env.SOWORK_API_KEY;
-  let refreshToken = env.SOWORK_REFRESH_TOKEN;
-  if (!apiKey || !refreshToken) {
-    // Fallback: trích từ SOWORK_SESSION đầy đủ (nếu đặt được).
-    const raw = JSON.stringify(await loadState(env));
-    apiKey = apiKey || (raw.match(/firebase:authUser:([^:]+):\[DEFAULT\]/) || [])[1];
-    refreshToken = refreshToken || (raw.match(/"k":"refreshToken","v":"([^"]+)"/) || [])[1];
-  }
-  if (!apiKey || !refreshToken) throw new Error('Thiếu SOWORK_API_KEY / SOWORK_REFRESH_TOKEN (hoặc SOWORK_SESSION).');
+async function soworkAuth(cfg) {
+  const apiKey = cfg.apiKey, refreshToken = cfg.refreshToken;
+  if (!apiKey || !refreshToken) throw new Error('Thiếu apiKey / refreshToken (kiểm tra USERS_JSON).');
   const r = await fetch(`https://securetoken.googleapis.com/v1/token?key=${apiKey}`, {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}`
   });
   const j = await r.json();
-  if (!j.id_token) throw new Error('PHIÊN HẾT HẠN — cần chạy lại capture-session.js + cập nhật SOWORK_SESSION.');
+  if (!j.id_token) throw new Error('PHIÊN HẾT HẠN — cần chạy lại capture-session.js + cập nhật refreshToken.');
   let p = j.id_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
   p += '==='.slice((p.length + 3) % 4); // padding base64
   const claims = JSON.parse(atob(p));
@@ -164,9 +173,9 @@ async function soworkAuth(env) {
 }
 function fmtDurSec(sec) { const m = Math.round(sec / 60); return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`; }
 
-async function soworkReport(env, withTime) {
-  const groupId = env.SOWORK_GROUP_ID || '5yBGdkKFdacSqo4bWb2j';
-  const { idToken, userId, userName } = await soworkAuth(env);
+async function soworkReport(cfg, withTime) {
+  const groupId = cfg.groupId || '5yBGdkKFdacSqo4bWb2j';
+  const { idToken, userId, userName } = await soworkAuth(cfg);
   const auth = { 'Authorization': `Bearer ${idToken}`, 'Content-Type': 'application/json' };
 
   // Trạng thái hiện tại
