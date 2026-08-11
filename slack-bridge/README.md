@@ -41,7 +41,8 @@ Trong Worker → **Settings → Variables and Secrets** → thêm từng biến,
 
 | Tên | Giá trị |
 |---|---|
-| `SLACK_SIGNING_SECRET` | Signing Secret ở Bước 2 |
+| `SLACK_SIGNING_SECRET` | Signing Secret ở Bước 2 (dùng khi Slack ký request — Slack App) |
+| `SLACK_VERIFICATION_TOKEN` | *(dùng nếu slash command KHÔNG ký — kiểu cũ)* Verification Token của command |
 | `GH_TOKEN` | PAT ở Bước 1 |
 | `GH_REPO` | `nhi-hoang-nsc/sowork` |
 | `SOWORK_API_KEY` | apiKey Firebase (nhỏ) — xem cách lấy bên dưới |

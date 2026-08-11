@@ -27,17 +27,30 @@ async function route(request, env, ctx) {
     if (request.method !== 'POST') return new Response('SoWork Slack bridge OK', { status: 200 });
 
     const raw = await request.text();
-
-    // 1) Xác thực chữ ký Slack — nếu sai, báo rõ vào Slack để dễ sửa
-    if (!env.SLACK_SIGNING_SECRET) {
-      return json({ response_type: 'ephemeral', text: '⚙️ Chưa đặt biến SLACK_SIGNING_SECRET trong Worker.' });
-    }
-    const ok = await verifySlack(request, raw, env.SLACK_SIGNING_SECRET);
-    if (!ok) {
-      return json({ response_type: 'ephemeral', text: '🚫 Chữ ký Slack không khớp — kiểm tra lại SLACK_SIGNING_SECRET (phải là *Signing Secret* trong Basic Information) và nhớ Deploy lại.' });
-    }
-
     const params = new URLSearchParams(raw);
+
+    // 1) Xác thực: có header ký -> verify HMAC (Slack App);
+    //    không có header ký -> Slash Command kiểu cũ -> so Verification Token trong body.
+    if (request.headers.get('X-Slack-Signature')) {
+      if (!env.SLACK_SIGNING_SECRET) {
+        return json({ response_type: 'ephemeral', text: '⚙️ Có chữ ký nhưng chưa đặt SLACK_SIGNING_SECRET trong Worker.' });
+      }
+      const v = await verifySlack(request, raw, env.SLACK_SIGNING_SECRET);
+      if (!v.ok) {
+        return json({ response_type: 'ephemeral', text: `🚫 Chữ ký không khớp — lý do: ${v.reason}\n${v.debug || ''}` });
+      }
+    } else {
+      // Không có chữ ký -> dùng Verification Token
+      const expected = (env.SLACK_VERIFICATION_TOKEN || '').trim();
+      const token = params.get('token');
+      if (!expected) {
+        return json({ response_type: 'ephemeral', text: '⚙️ Slash command này không gửi chữ ký (kiểu cũ). Hãy đặt biến SLACK_VERIFICATION_TOKEN trong Worker (lấy ở trang cấu hình Slash Command hoặc Basic Information → Verification Token).' });
+      }
+      if (!token || token !== expected) {
+        const mask = s => s ? `${s.slice(0, 4)}…${s.slice(-2)}(${s.length})` : '(trống)';
+        return json({ response_type: 'ephemeral', text: `🚫 Verification token không khớp.\nSlack gửi: ${mask(token)}\nWorker có: ${mask(expected)}\n→ Copy đúng "Slack gửi" vào SLACK_VERIFICATION_TOKEN.` });
+      }
+    }
     const text = (params.get('text') || '').trim().toLowerCase();
     const responseUrl = params.get('response_url');
     const userId = params.get('user_id');
@@ -192,18 +205,24 @@ async function postSlack(responseUrl, text) {
   await fetch(responseUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ response_type: 'ephemeral', text }) });
 }
 async function verifySlack(request, rawBody, signingSecret) {
-  if (!signingSecret) return false;
+  if (!signingSecret) return { ok: false, reason: 'thiếu SLACK_SIGNING_SECRET' };
+  signingSecret = signingSecret.trim(); // bỏ khoảng trắng/xuống dòng lỡ dính khi dán
   const ts = request.headers.get('X-Slack-Request-Timestamp');
   const sig = request.headers.get('X-Slack-Signature');
-  if (!ts || !sig) return false;
-  if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false; // chống replay
+  if (!ts || !sig) {
+    const names = [...request.headers.keys()].join(', ');
+    return { ok: false, reason: 'thiếu header X-Slack-*', debug: `Header nhận được: ${names}` };
+  }
+  const age = Math.abs(Date.now() / 1000 - Number(ts));
+  if (age > 300) return { ok: false, reason: `timestamp quá cũ (${Math.round(age)}s) — lệch giờ?` };
   const base = `v0:${ts}:${rawBody}`;
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(signingSecret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(base));
   const hex = [...new Uint8Array(mac)].map(b => b.toString(16).padStart(2, '0')).join('');
   const mine = `v0=${hex}`;
-  // so sánh an toàn theo thời gian
-  if (mine.length !== sig.length) return false;
-  let diff = 0; for (let i = 0; i < mine.length; i++) diff |= mine.charCodeAt(i) ^ sig.charCodeAt(i);
-  return diff === 0;
+  let diff = mine.length === sig.length ? 0 : 1;
+  for (let i = 0; i < Math.min(mine.length, sig.length); i++) diff |= mine.charCodeAt(i) ^ sig.charCodeAt(i);
+  if (diff === 0) return { ok: true };
+  const debug = `len(secret)=${signingSecret.length}, body=${rawBody.length}b, mine=${mine.slice(0, 12)}…, slack=${sig.slice(0, 12)}…`;
+  return { ok: false, reason: 'HMAC không trùng (sai Signing Secret hoặc sai app)', debug };
 }
